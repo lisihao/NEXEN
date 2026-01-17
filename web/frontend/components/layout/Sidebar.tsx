@@ -88,8 +88,8 @@ const navigationItems = [
             },
             {
                 id: 'ai-teams',
-                label: 'My Teams',
-                labelCn: '我的团队',
+                label: 'Research Team',
+                labelCn: '研究团队',
                 href: '/ai-teams',
                 icon: Users,
             },

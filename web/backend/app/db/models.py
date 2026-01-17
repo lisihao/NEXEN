@@ -11,6 +11,7 @@ Models:
 - DecisionAnalysis (AI Decision)
 - Team, TeamMember, TeamTask (My Teams)
 - InstalledTool (AI Tools)
+- AgentProfile, AgentExecution, ResearchTask (Multi-Agent Research)
 """
 
 import uuid
@@ -55,6 +56,7 @@ class User(Base):
     team_memberships: Mapped[list["TeamMember"]] = relationship("TeamMember", back_populates="user")
     installed_tools: Mapped[list["InstalledTool"]] = relationship("InstalledTool", back_populates="user")
     search_histories: Mapped[list["SearchHistory"]] = relationship("SearchHistory", back_populates="user")
+    agent_profiles: Mapped[list["AgentProfile"]] = relationship("AgentProfile", back_populates="user")
 
     def to_dict(self, include_email: bool = False) -> dict:
         """Convert to dictionary, excluding sensitive fields."""
@@ -135,10 +137,12 @@ class ResearchSession(Base):
     
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="sessions")
-    
+    agent_executions: Mapped[list["AgentExecution"]] = relationship("AgentExecution", back_populates="session", cascade="all, delete-orphan")
+    research_tasks: Mapped[list["ResearchTask"]] = relationship("ResearchTask", back_populates="session", cascade="all, delete-orphan")
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -771,4 +775,193 @@ class InstalledTool(Base):
             "usage_count": self.usage_count,
             "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
             "installed_at": self.installed_at.isoformat() if self.installed_at else None,
+        }
+
+
+# =============================================================================
+# Multi-Agent Research Module
+# =============================================================================
+
+class AgentProfile(Base):
+    """Agent configuration profile for multi-agent research system."""
+
+    __tablename__ = "agent_profiles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+
+    # Agent identification
+    agent_type: Mapped[str] = mapped_column(String(50), nullable=False)  # meta_coordinator, explorer, logician, etc.
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    display_name_cn: Mapped[str] = mapped_column(String(100), nullable=False)
+    cluster: Mapped[str] = mapped_column(String(30), default="custom")  # reasoning, information, production, coordination, custom
+    is_custom: Mapped[bool] = mapped_column(Boolean, default=True)  # False for default agents
+
+    # Model configuration
+    role_model: Mapped[str] = mapped_column(String(100), nullable=False)  # claude-opus-4, openai/o3, etc.
+    fallback_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    temperature: Mapped[float] = mapped_column(Float, default=0.7)
+    max_tokens: Mapped[int] = mapped_column(Integer, default=4000)
+
+    # Persona configuration
+    persona: Mapped[str] = mapped_column(Text, default="")  # System prompt / persona description
+    traits: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)  # {"risk_preference": "high", "creativity": "medium"}
+    responsibilities: Mapped[Optional[dict]] = mapped_column(JSON, default=list)  # ["文献检索", "趋势分析"]
+
+    # Pipeline configuration (Module 1/2/3)
+    pipeline_config: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+
+    # Data sources and skills
+    data_sources: Mapped[Optional[dict]] = mapped_column(JSON, default=list)  # ["arxiv", "semantic_scholar"]
+    enabled_skills: Mapped[Optional[dict]] = mapped_column(JSON, default=list)  # ["/survey", "/paper-deep-dive"]
+
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", back_populates="agent_profiles")
+    executions: Mapped[list["AgentExecution"]] = relationship("AgentExecution", back_populates="agent_profile")
+
+    def to_dict(self, include_config: bool = False) -> dict:
+        data = {
+            "id": self.id,
+            "user_id": self.user_id,
+            "agent_type": self.agent_type,
+            "display_name": self.display_name,
+            "display_name_cn": self.display_name_cn,
+            "cluster": self.cluster,
+            "is_custom": self.is_custom,
+            "role_model": self.role_model,
+            "fallback_model": self.fallback_model,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "is_enabled": self.is_enabled,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+        if include_config:
+            data["persona"] = self.persona
+            data["traits"] = self.traits or {}
+            data["responsibilities"] = self.responsibilities or []
+            data["pipeline_config"] = self.pipeline_config or {}
+            data["data_sources"] = self.data_sources or []
+            data["enabled_skills"] = self.enabled_skills or []
+        return data
+
+
+class AgentExecution(Base):
+    """Agent execution record for tracking agent activities."""
+
+    __tablename__ = "agent_executions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("research_sessions.id", ondelete="CASCADE"), index=True)
+    agent_profile_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("agent_profiles.id", ondelete="SET NULL"), nullable=True)
+    research_task_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("research_tasks.id", ondelete="SET NULL"), nullable=True)
+
+    # Agent info (denormalized for historical record)
+    agent_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    agent_name: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    # Task
+    task_description: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, running, completed, failed
+
+    # Input/Output
+    input_context: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+    output_result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    structured_output: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)  # key_findings, uncertainties, suggestions
+
+    # Performance metrics
+    tokens_used: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    model_used: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # Memory path
+    raw_output_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # L0 storage path
+
+    # Error handling
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    session: Mapped["ResearchSession"] = relationship("ResearchSession", back_populates="agent_executions")
+    agent_profile: Mapped[Optional["AgentProfile"]] = relationship("AgentProfile", back_populates="executions")
+    research_task: Mapped[Optional["ResearchTask"]] = relationship("ResearchTask", back_populates="execution")
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "session_id": self.session_id,
+            "agent_profile_id": self.agent_profile_id,
+            "research_task_id": self.research_task_id,
+            "agent_type": self.agent_type,
+            "agent_name": self.agent_name,
+            "task_description": self.task_description,
+            "status": self.status,
+            "output_result": self.output_result,
+            "structured_output": self.structured_output or {},
+            "tokens_used": self.tokens_used,
+            "duration_ms": self.duration_ms,
+            "model_used": self.model_used,
+            "confidence": self.confidence,
+            "error_message": self.error_message,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
+class ResearchTask(Base):
+    """Research task decomposition for multi-agent coordination."""
+
+    __tablename__ = "research_tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("research_sessions.id", ondelete="CASCADE"), index=True)
+    parent_task_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("research_tasks.id", ondelete="CASCADE"), nullable=True)
+
+    # Task details
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    assigned_agent: Mapped[str] = mapped_column(String(50), nullable=False)  # agent_type
+    priority: Mapped[str] = mapped_column(String(20), default="medium")  # critical, high, medium, low
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, in_progress, completed, failed
+
+    # Execution order and dependencies
+    dependencies: Mapped[Optional[dict]] = mapped_column(JSON, default=list)  # [task_id, ...]
+    execution_order: Mapped[int] = mapped_column(Integer, default=0)
+    execution_group: Mapped[int] = mapped_column(Integer, default=0)  # For parallel execution
+
+    # Output
+    output: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    session: Mapped["ResearchSession"] = relationship("ResearchSession", back_populates="research_tasks")
+    parent_task: Mapped[Optional["ResearchTask"]] = relationship("ResearchTask", remote_side=[id], backref="subtasks")
+    execution: Mapped[Optional["AgentExecution"]] = relationship("AgentExecution", back_populates="research_task", uselist=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "session_id": self.session_id,
+            "parent_task_id": self.parent_task_id,
+            "description": self.description,
+            "assigned_agent": self.assigned_agent,
+            "priority": self.priority,
+            "status": self.status,
+            "dependencies": self.dependencies or [],
+            "execution_order": self.execution_order,
+            "execution_group": self.execution_group,
+            "output": self.output,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

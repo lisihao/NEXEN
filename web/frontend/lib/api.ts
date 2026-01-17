@@ -476,3 +476,1308 @@ export const writingApi = {
             }
         ),
 };
+
+// =============================================================================
+// Reports API Types
+// =============================================================================
+
+export interface ReportSection {
+    id: string;
+    title: string;
+    content: string;
+    order: number;
+    ai_generated: boolean;
+}
+
+export interface ChartDataPoint {
+    name: string;
+    value: number;
+    extra?: Record<string, unknown>;
+    [key: string]: unknown;
+}
+
+export interface ChartConfig {
+    xKey: string;
+    yKey: string;
+    colors: string[];
+}
+
+export interface ReportChart {
+    id: string;
+    type: 'line' | 'bar' | 'pie' | 'area';
+    title: string;
+    data: ChartDataPoint[];
+    config: ChartConfig;
+}
+
+export interface Report {
+    id: string;
+    title: string;
+    template_type: string;
+    status: 'draft' | 'generating' | 'completed' | 'exported';
+    sections: ReportSection[];
+    charts_data: ReportChart[];
+    content: string;
+    content_html: string;
+    export_format: string | null;
+    exported_at: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface ReportList {
+    reports: Report[];
+    total: number;
+    page: number;
+    page_size: number;
+}
+
+export interface ReportTemplate {
+    id: string;
+    name: string;
+    name_cn: string;
+    description: string;
+    icon: string;
+    sections: { title: string; placeholder: string }[];
+}
+
+export interface ChartType {
+    id: string;
+    name: string;
+    description: string;
+}
+
+export interface AIGenerateRequest {
+    section_id?: string;
+    prompt?: string;
+    model?: string;
+}
+
+// =============================================================================
+// Reports API
+// =============================================================================
+
+export const reportsApi = {
+    // Templates
+    getTemplates: () => fetchApiWithAuth<{ templates: ReportTemplate[] }>('/reports/templates'),
+
+    getChartTypes: () => fetchApiWithAuth<{ chart_types: ChartType[] }>('/reports/chart-types'),
+
+    // Reports CRUD
+    getReports: (params?: { page?: number; page_size?: number; status?: string; template_type?: string }) => {
+        const searchParams = new URLSearchParams();
+        if (params?.page) searchParams.set('page', params.page.toString());
+        if (params?.page_size) searchParams.set('page_size', params.page_size.toString());
+        if (params?.status) searchParams.set('status', params.status);
+        if (params?.template_type) searchParams.set('template_type', params.template_type);
+        const query = searchParams.toString();
+        return fetchApiWithAuth<ReportList>(`/reports/reports${query ? `?${query}` : ''}`);
+    },
+
+    createReport: (data: { title: string; template_type?: string; research_session_id?: string }) =>
+        fetchApiWithAuth<Report>('/reports/reports', {
+            method: 'POST',
+            body: JSON.stringify(data),
+        }),
+
+    getReport: (id: string) => fetchApiWithAuth<Report>(`/reports/reports/${id}`),
+
+    updateReport: (id: string, data: { title?: string; content?: string; content_html?: string; status?: string }) =>
+        fetchApiWithAuth<Report>(`/reports/reports/${id}`, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        }),
+
+    deleteReport: (id: string) =>
+        fetchApiWithAuth<void>(`/reports/reports/${id}`, {
+            method: 'DELETE',
+        }),
+
+    // Sections
+    addSection: (reportId: string, data: { title?: string; content?: string }) =>
+        fetchApiWithAuth<{ message: string; section: ReportSection }>(`/reports/reports/${reportId}/sections`, {
+            method: 'POST',
+            body: JSON.stringify(data),
+        }),
+
+    updateSection: (reportId: string, sectionId: string, data: { title?: string; content?: string }) =>
+        fetchApiWithAuth<{ message: string; section_id: string }>(`/reports/reports/${reportId}/sections/${sectionId}`, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        }),
+
+    deleteSection: (reportId: string, sectionId: string) =>
+        fetchApiWithAuth<{ message: string }>(`/reports/reports/${reportId}/sections/${sectionId}`, {
+            method: 'DELETE',
+        }),
+
+    // Charts
+    addChart: (reportId: string, data: { type: string; title: string; data: ChartDataPoint[]; config?: ChartConfig }) =>
+        fetchApiWithAuth<{ message: string; chart: ReportChart }>(`/reports/reports/${reportId}/charts`, {
+            method: 'POST',
+            body: JSON.stringify(data),
+        }),
+
+    updateChart: (reportId: string, chartId: string, data: { title?: string; data?: ChartDataPoint[]; config?: ChartConfig }) =>
+        fetchApiWithAuth<{ message: string; chart_id: string }>(`/reports/reports/${reportId}/charts/${chartId}`, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        }),
+
+    deleteChart: (reportId: string, chartId: string) =>
+        fetchApiWithAuth<{ message: string }>(`/reports/reports/${reportId}/charts/${chartId}`, {
+            method: 'DELETE',
+        }),
+
+    // AI Generation (streaming)
+    generateContent: async (
+        reportId: string,
+        request: AIGenerateRequest,
+        onChunk: (chunk: string) => void,
+        onDone?: (sectionId?: string) => void,
+        onError?: (error: string) => void
+    ): Promise<void> => {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        const response = await fetch(`${API_BASE}/reports/reports/${reportId}/generate`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify(request),
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'AI request failed' }));
+            throw new Error(error.detail || 'AI request failed');
+        }
+
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+
+        while (reader) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value);
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    try {
+                        const data = JSON.parse(line.slice(6));
+                        if (data.content) {
+                            onChunk(data.content);
+                        }
+                        if (data.error) {
+                            onError?.(data.error);
+                            throw new Error(data.error);
+                        }
+                        if (data.done) {
+                            onDone?.(data.section_id);
+                            return;
+                        }
+                    } catch (e) {
+                        if (e instanceof SyntaxError) continue;
+                        throw e;
+                    }
+                }
+            }
+        }
+    },
+
+    // Export
+    exportReport: async (reportId: string, format: 'pdf' | 'docx' | 'md'): Promise<Blob> => {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        const response = await fetch(`${API_BASE}/reports/reports/${reportId}/export`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({ format }),
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Export failed' }));
+            throw new Error(error.detail || 'Export failed');
+        }
+
+        return response.blob();
+    },
+};
+
+// =============================================================================
+// Image API
+// =============================================================================
+
+export interface ImageModel {
+    id: string;
+    name: string;
+    provider: string;
+    type: string;
+    sizes?: string[];
+}
+
+export interface ImageModelsResponse {
+    generation_models: ImageModel[];
+    analysis_models: ImageModel[];
+}
+
+export interface ImageGeneration {
+    id: string;
+    prompt: string;
+    negative_prompt?: string;
+    model: string;
+    image_url?: string;
+    width: number;
+    height: number;
+    style?: string;
+    quality?: string;
+    status: string;
+    error_message?: string;
+    created_at: string;
+}
+
+export interface ImageGenerationListResponse {
+    generations: ImageGeneration[];
+    total: number;
+}
+
+export interface ImageGenerateOptions {
+    model?: string;
+    size?: string;
+    style?: string;
+    quality?: string;
+    negative_prompt?: string;
+}
+
+export const imageApi = {
+    getModels: () => fetchApiWithAuth<ImageModelsResponse>('/image/models'),
+
+    generate: (prompt: string, options: ImageGenerateOptions = {}) =>
+        fetchApiWithAuth<ImageGeneration>('/image/generate', {
+            method: 'POST',
+            body: JSON.stringify({
+                prompt,
+                model: options.model || 'dall-e-3',
+                size: options.size || '1024x1024',
+                style: options.style || 'vivid',
+                quality: options.quality || 'standard',
+                negative_prompt: options.negative_prompt,
+            }),
+        }),
+
+    getGenerations: (skip = 0, limit = 20) =>
+        fetchApiWithAuth<ImageGenerationListResponse>(`/image/generations?skip=${skip}&limit=${limit}`),
+
+    getGeneration: (id: string) =>
+        fetchApiWithAuth<ImageGeneration>(`/image/generations/${id}`),
+
+    deleteGeneration: (id: string) =>
+        fetchApiWithAuth<{ message: string }>(`/image/generations/${id}`, {
+            method: 'DELETE',
+        }),
+
+    analyzeImage: async (
+        imageUrl: string,
+        prompt: string,
+        model: string,
+        onChunk: (content: string) => void,
+        onDone: () => void,
+        onError: (error: string) => void
+    ): Promise<void> => {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        const response = await fetch(`${API_BASE}/image/analyze`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({ image_url: imageUrl, prompt, model }),
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Analysis failed' }));
+            throw new Error(error.detail || 'Analysis failed');
+        }
+
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+
+        if (reader) {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const chunk = decoder.decode(value);
+                const lines = chunk.split('\n');
+
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const data = JSON.parse(line.slice(6));
+                            if (data.content) {
+                                onChunk(data.content);
+                            } else if (data.error) {
+                                onError(data.error);
+                                return;
+                            } else if (data.done) {
+                                onDone();
+                                return;
+                            }
+                        } catch {
+                            // Ignore parse errors
+                        }
+                    }
+                }
+            }
+        }
+    },
+
+    analyzeUploadedImage: async (
+        file: File,
+        prompt: string,
+        model: string,
+        onChunk: (content: string) => void,
+        onDone: () => void,
+        onError: (error: string) => void
+    ): Promise<void> => {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('prompt', prompt);
+        formData.append('model', model);
+
+        const response = await fetch(`${API_BASE}/image/analyze-upload`, {
+            method: 'POST',
+            headers: {
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: formData,
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Analysis failed' }));
+            throw new Error(error.detail || 'Analysis failed');
+        }
+
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+
+        if (reader) {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const chunk = decoder.decode(value);
+                const lines = chunk.split('\n');
+
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const data = JSON.parse(line.slice(6));
+                            if (data.content) {
+                                onChunk(data.content);
+                            } else if (data.error) {
+                                onError(data.error);
+                                return;
+                            } else if (data.done) {
+                                onDone();
+                                return;
+                            }
+                        } catch {
+                            // Ignore parse errors
+                        }
+                    }
+                }
+            }
+        }
+    },
+};
+
+// =============================================================================
+// Teams API
+// =============================================================================
+
+export interface TeamMember {
+    id: string;
+    user_id: string;
+    username: string;
+    email: string;
+    role: string;
+    joined_at: string;
+}
+
+export interface Team {
+    id: string;
+    owner_id: string;
+    name: string;
+    description?: string;
+    avatar_url?: string;
+    member_count: number;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface TeamDetail extends Team {
+    members: TeamMember[];
+}
+
+export interface TeamListResponse {
+    teams: Team[];
+    total: number;
+}
+
+export interface TeamTask {
+    id: string;
+    team_id: string;
+    title: string;
+    description?: string;
+    status: string;
+    priority: string;
+    due_date?: string;
+    completed_at?: string;
+    assignee_id?: string;
+    assignee_name?: string;
+    created_by_id: string;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface TaskListResponse {
+    tasks: TeamTask[];
+    total: number;
+}
+
+export const teamsApi = {
+    // Teams
+    getTeams: () => fetchApiWithAuth<TeamListResponse>('/teams/teams'),
+
+    createTeam: (data: { name: string; description?: string }) =>
+        fetchApiWithAuth<Team>('/teams/teams', {
+            method: 'POST',
+            body: JSON.stringify(data),
+        }),
+
+    getTeam: (id: string) => fetchApiWithAuth<TeamDetail>(`/teams/teams/${id}`),
+
+    updateTeam: (id: string, data: { name?: string; description?: string; settings?: Record<string, unknown> }) =>
+        fetchApiWithAuth<Team>(`/teams/teams/${id}`, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        }),
+
+    deleteTeam: (id: string) =>
+        fetchApiWithAuth<void>(`/teams/teams/${id}`, {
+            method: 'DELETE',
+        }),
+
+    // Members
+    getMembers: (teamId: string) =>
+        fetchApiWithAuth<TeamMember[]>(`/teams/teams/${teamId}/members`),
+
+    addMember: (teamId: string, data: { email: string; role?: string }) =>
+        fetchApiWithAuth<TeamMember>(`/teams/teams/${teamId}/members`, {
+            method: 'POST',
+            body: JSON.stringify(data),
+        }),
+
+    updateMember: (teamId: string, userId: string, data: { role: string }) =>
+        fetchApiWithAuth<TeamMember>(`/teams/teams/${teamId}/members/${userId}`, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        }),
+
+    removeMember: (teamId: string, userId: string) =>
+        fetchApiWithAuth<void>(`/teams/teams/${teamId}/members/${userId}`, {
+            method: 'DELETE',
+        }),
+
+    // Tasks
+    getTasks: (teamId: string, filters?: { status?: string; assignee_id?: string; priority?: string }) => {
+        const params = new URLSearchParams();
+        if (filters?.status) params.append('status', filters.status);
+        if (filters?.assignee_id) params.append('assignee_id', filters.assignee_id);
+        if (filters?.priority) params.append('priority', filters.priority);
+        const query = params.toString();
+        return fetchApiWithAuth<TaskListResponse>(`/teams/teams/${teamId}/tasks${query ? `?${query}` : ''}`);
+    },
+
+    createTask: (teamId: string, data: {
+        title: string;
+        description?: string;
+        priority?: string;
+        due_date?: string;
+        assignee_id?: string;
+    }) =>
+        fetchApiWithAuth<TeamTask>(`/teams/teams/${teamId}/tasks`, {
+            method: 'POST',
+            body: JSON.stringify(data),
+        }),
+
+    updateTask: (teamId: string, taskId: string, data: {
+        title?: string;
+        description?: string;
+        status?: string;
+        priority?: string;
+        due_date?: string;
+        assignee_id?: string;
+    }) =>
+        fetchApiWithAuth<TeamTask>(`/teams/teams/${teamId}/tasks/${taskId}`, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        }),
+
+    deleteTask: (teamId: string, taskId: string) =>
+        fetchApiWithAuth<void>(`/teams/teams/${teamId}/tasks/${taskId}`, {
+            method: 'DELETE',
+        }),
+
+    // My Tasks (across all teams)
+    getMyTasks: (status?: string) => {
+        const query = status ? `?status=${status}` : '';
+        return fetchApiWithAuth<TaskListResponse>(`/teams/my-tasks${query}`);
+    },
+};
+
+// =============================================================================
+// Store API Types
+// =============================================================================
+
+export interface ToolConfigOption {
+    type: string;
+    default?: unknown;
+    min?: number;
+    max?: number;
+    options?: string[];
+}
+
+export interface CatalogTool {
+    tool_id: string;
+    name: string;
+    name_cn: string;
+    description: string;
+    description_cn: string;
+    category: string;
+    version: string;
+    author: string;
+    icon: string;
+    config_schema: Record<string, ToolConfigOption>;
+    features: string[];
+    tags: string[];
+    is_installed: boolean;
+    is_enabled: boolean;
+    user_config: Record<string, unknown> | null;
+    usage_count: number;
+    installed_at: string | null;
+}
+
+export interface InstalledTool {
+    id: string;
+    tool_id: string;
+    tool_name: string;
+    tool_version: string;
+    is_enabled: boolean;
+    config: Record<string, unknown>;
+    usage_count: number;
+    last_used_at: string | null;
+    installed_at: string;
+    description: string;
+    description_cn: string;
+    category: string;
+    icon: string;
+    config_schema: Record<string, ToolConfigOption>;
+}
+
+export interface ToolCategory {
+    id: string;
+    name: string;
+    name_cn: string;
+    icon: string;
+}
+
+export interface CatalogListResponse {
+    tools: CatalogTool[];
+    total: number;
+    categories: string[];
+}
+
+export interface InstalledToolListResponse {
+    tools: InstalledTool[];
+    total: number;
+}
+
+// =============================================================================
+// Store API
+// =============================================================================
+
+export const storeApi = {
+    // Catalog
+    getCatalog: (params?: { category?: string; search?: string }) => {
+        const searchParams = new URLSearchParams();
+        if (params?.category) searchParams.set('category', params.category);
+        if (params?.search) searchParams.set('search', params.search);
+        const query = searchParams.toString();
+        return fetchApiWithAuth<CatalogListResponse>(`/store/catalog${query ? `?${query}` : ''}`);
+    },
+
+    getCatalogTool: (toolId: string) =>
+        fetchApiWithAuth<CatalogTool>(`/store/catalog/${toolId}`),
+
+    getCategories: () =>
+        fetchApiWithAuth<{ categories: ToolCategory[] }>('/store/categories'),
+
+    // Installation
+    installTool: (toolId: string, config?: Record<string, unknown>) =>
+        fetchApiWithAuth<InstalledTool>('/store/install', {
+            method: 'POST',
+            body: JSON.stringify({ tool_id: toolId, config }),
+        }),
+
+    uninstallTool: (toolId: string) =>
+        fetchApiWithAuth<void>(`/store/installed/${toolId}`, {
+            method: 'DELETE',
+        }),
+
+    // Installed tools management
+    getInstalledTools: (enabledOnly = false) => {
+        const query = enabledOnly ? '?enabled_only=true' : '';
+        return fetchApiWithAuth<InstalledToolListResponse>(`/store/installed${query}`);
+    },
+
+    getInstalledTool: (toolId: string) =>
+        fetchApiWithAuth<InstalledTool>(`/store/installed/${toolId}`),
+
+    updateInstalledTool: (toolId: string, data: { config?: Record<string, unknown>; is_enabled?: boolean }) =>
+        fetchApiWithAuth<InstalledTool>(`/store/installed/${toolId}`, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        }),
+
+    toggleTool: (toolId: string) =>
+        fetchApiWithAuth<InstalledTool>(`/store/installed/${toolId}/toggle`, {
+            method: 'POST',
+        }),
+
+    recordUsage: (toolId: string) =>
+        fetchApiWithAuth<{ message: string; usage_count: number }>(`/store/installed/${toolId}/usage`, {
+            method: 'POST',
+        }),
+};
+
+// =============================================================================
+// Decision API Types
+// =============================================================================
+
+export interface DecisionOption {
+    id: string;
+    name: string;
+    description?: string;
+}
+
+export interface DecisionCriterion {
+    id: string;
+    name: string;
+    description?: string;
+    type: 'benefit' | 'cost';
+}
+
+export interface DecisionScenario {
+    id: string;
+    name: string;
+    weight_adjustments: Record<string, number>;
+    results?: Record<string, number>;
+    ranking?: string[];
+}
+
+export interface DecisionAnalysis {
+    id: string;
+    user_id: string;
+    title: string;
+    description?: string;
+    options: DecisionOption[];
+    criteria: DecisionCriterion[];
+    weights: Record<string, number>;
+    scores: Record<string, Record<string, number>>;
+    results: Record<string, number>;
+    ranking: string[];
+    scenarios: DecisionScenario[];
+    ai_recommendation?: string;
+    ai_analysis?: Record<string, unknown>;
+    status: string;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface DecisionListItem {
+    id: string;
+    title: string;
+    description?: string;
+    status: string;
+    option_count: number;
+    criteria_count: number;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface DecisionListResponse {
+    analyses: DecisionListItem[];
+    total: number;
+    page: number;
+    page_size: number;
+}
+
+export interface CalculationResult {
+    results: Record<string, number>;
+    ranking: string[];
+}
+
+// =============================================================================
+// Decision API
+// =============================================================================
+
+export const decisionApi = {
+    // CRUD
+    getAnalyses: (params?: { page?: number; page_size?: number; status?: string }) => {
+        const searchParams = new URLSearchParams();
+        if (params?.page) searchParams.set('page', params.page.toString());
+        if (params?.page_size) searchParams.set('page_size', params.page_size.toString());
+        if (params?.status) searchParams.set('status', params.status);
+        const query = searchParams.toString();
+        return fetchApiWithAuth<DecisionListResponse>(`/decisions${query ? `?${query}` : ''}`);
+    },
+
+    createAnalysis: (data: { title: string; description?: string }) =>
+        fetchApiWithAuth<DecisionAnalysis>('/decisions', {
+            method: 'POST',
+            body: JSON.stringify(data),
+        }),
+
+    getAnalysis: (id: string) => fetchApiWithAuth<DecisionAnalysis>(`/decisions/${id}`),
+
+    updateAnalysis: (id: string, data: { title?: string; description?: string; status?: string }) =>
+        fetchApiWithAuth<DecisionAnalysis>(`/decisions/${id}`, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        }),
+
+    deleteAnalysis: (id: string) =>
+        fetchApiWithAuth<void>(`/decisions/${id}`, {
+            method: 'DELETE',
+        }),
+
+    // Matrix Operations
+    updateOptions: (id: string, options: DecisionOption[]) =>
+        fetchApiWithAuth<DecisionAnalysis>(`/decisions/${id}/options`, {
+            method: 'PUT',
+            body: JSON.stringify({ options }),
+        }),
+
+    updateCriteria: (id: string, criteria: DecisionCriterion[]) =>
+        fetchApiWithAuth<DecisionAnalysis>(`/decisions/${id}/criteria`, {
+            method: 'PUT',
+            body: JSON.stringify({ criteria }),
+        }),
+
+    updateWeights: (id: string, weights: Record<string, number>) =>
+        fetchApiWithAuth<DecisionAnalysis>(`/decisions/${id}/weights`, {
+            method: 'PUT',
+            body: JSON.stringify({ weights }),
+        }),
+
+    updateScores: (id: string, scores: Record<string, Record<string, number>>) =>
+        fetchApiWithAuth<DecisionAnalysis>(`/decisions/${id}/scores`, {
+            method: 'PUT',
+            body: JSON.stringify({ scores }),
+        }),
+
+    // Calculation
+    calculate: (id: string) =>
+        fetchApiWithAuth<CalculationResult>(`/decisions/${id}/calculate`, {
+            method: 'POST',
+        }),
+
+    // Scenarios
+    addScenario: (id: string, data: { name: string; weight_adjustments: Record<string, number> }) =>
+        fetchApiWithAuth<{ message: string; scenario: DecisionScenario }>(`/decisions/${id}/scenarios`, {
+            method: 'POST',
+            body: JSON.stringify(data),
+        }),
+
+    deleteScenario: (id: string, scenarioId: string) =>
+        fetchApiWithAuth<void>(`/decisions/${id}/scenarios/${scenarioId}`, {
+            method: 'DELETE',
+        }),
+
+    simulate: (id: string, scenarioId: string) =>
+        fetchApiWithAuth<CalculationResult>(`/decisions/${id}/simulate`, {
+            method: 'POST',
+            body: JSON.stringify({ scenario_id: scenarioId }),
+        }),
+
+    // AI Recommendation (streaming)
+    generateRecommendation: async (
+        id: string,
+        request: { prompt?: string; model?: string },
+        onChunk: (content: string) => void,
+        onDone?: () => void,
+        onError?: (error: string) => void
+    ): Promise<void> => {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        const response = await fetch(`${API_BASE}/decisions/${id}/ai-recommendation`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify(request),
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'AI request failed' }));
+            throw new Error(error.detail || 'AI request failed');
+        }
+
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+
+        while (reader) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value);
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    try {
+                        const data = JSON.parse(line.slice(6));
+                        if (data.content) {
+                            onChunk(data.content);
+                        }
+                        if (data.error) {
+                            onError?.(data.error);
+                            throw new Error(data.error);
+                        }
+                        if (data.done) {
+                            onDone?.();
+                            return;
+                        }
+                    } catch (e) {
+                        if (e instanceof SyntaxError) continue;
+                        throw e;
+                    }
+                }
+            }
+        }
+    },
+};
+
+// =============================================================================
+// Agent Profile API Types (Multi-Agent Research System)
+// =============================================================================
+
+export interface PipelineModule1Config {
+    generator_model: string;
+    reviewer_model: string;
+    refiner_model: string;
+    template_type: string;
+    pass_threshold: number;
+    max_iterations: number;
+    special_instructions: string;
+}
+
+export interface PipelineModule2Config {
+    analyzer_model: string;
+    default_insights: string[];
+    agent_digests: string[];
+    semantic_search_enabled: boolean;
+    semantic_top_k: number;
+    token_budget: number;
+    focus_topics: string[];
+}
+
+export interface PipelineModule3Config {
+    preprocessor_model: string;
+    tasks: string[];
+    temperature: number;
+    max_tokens: number;
+}
+
+export interface PipelineConfig {
+    module1: PipelineModule1Config;
+    module2: PipelineModule2Config;
+    module3: PipelineModule3Config;
+}
+
+export interface AgentProfile {
+    id: string;
+    user_id: string;
+    agent_type: string;
+    display_name: string;
+    display_name_cn: string;
+    cluster: 'reasoning' | 'information' | 'production' | 'coordination';
+    role_model: string;
+    fallback_model?: string;
+    temperature: number;
+    max_tokens: number;
+    persona: string;
+    traits: Record<string, string>;
+    responsibilities: string[];
+    pipeline_config: PipelineConfig;
+    data_sources: string[];
+    enabled_skills: string[];
+    is_custom: boolean;
+    is_enabled: boolean;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface AgentProfileCreate {
+    agent_type: string;
+    display_name: string;
+    display_name_cn: string;
+    cluster?: 'reasoning' | 'information' | 'production' | 'coordination';
+    role_model: string;
+    fallback_model?: string;
+    temperature?: number;
+    max_tokens?: number;
+    persona?: string;
+    traits?: Record<string, string>;
+    responsibilities?: string[];
+    pipeline_config?: Partial<PipelineConfig>;
+    data_sources?: string[];
+    enabled_skills?: string[];
+}
+
+export interface AgentProfileUpdate {
+    display_name?: string;
+    display_name_cn?: string;
+    role_model?: string;
+    fallback_model?: string;
+    temperature?: number;
+    max_tokens?: number;
+    persona?: string;
+    traits?: Record<string, string>;
+    responsibilities?: string[];
+    pipeline_config?: Partial<PipelineConfig>;
+    data_sources?: string[];
+    enabled_skills?: string[];
+    is_enabled?: boolean;
+}
+
+export interface DefaultAgentTemplate {
+    agent_type: string;
+    display_name: string;
+    display_name_cn: string;
+    cluster: string;
+    role_model: string;
+    fallback_model?: string;
+    temperature: number;
+    max_tokens: number;
+    persona: string;
+    traits: Record<string, string>;
+    responsibilities: string[];
+    pipeline_config: PipelineConfig;
+    data_sources: string[];
+    enabled_skills: string[];
+}
+
+export interface AgentTestResult {
+    agent_id: string;
+    agent_type: string;
+    task: string;
+    result: string;
+    tokens_used: number;
+    duration_ms: number;
+    model_used: string;
+}
+
+// =============================================================================
+// Agent Profile API
+// =============================================================================
+
+export const agentApi = {
+    // Get all user's agent profiles
+    getProfiles: () =>
+        fetchApiWithAuth<{ profiles: AgentProfile[]; total: number }>('/agents/profiles'),
+
+    // Get default agent templates (14 agents)
+    getDefaults: () =>
+        fetchApiWithAuth<{ agents: DefaultAgentTemplate[] }>('/agents/profiles/defaults'),
+
+    // Initialize default agents for user
+    initDefaults: () =>
+        fetchApiWithAuth<{ message: string; created_count: number }>('/agents/profiles/init-defaults', {
+            method: 'POST',
+        }),
+
+    // Create custom agent profile
+    createProfile: (data: AgentProfileCreate) =>
+        fetchApiWithAuth<AgentProfile>('/agents/profiles', {
+            method: 'POST',
+            body: JSON.stringify(data),
+        }),
+
+    // Get single profile
+    getProfile: (id: string) =>
+        fetchApiWithAuth<AgentProfile>(`/agents/profiles/${id}`),
+
+    // Update profile
+    updateProfile: (id: string, data: AgentProfileUpdate) =>
+        fetchApiWithAuth<AgentProfile>(`/agents/profiles/${id}`, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        }),
+
+    // Delete profile
+    deleteProfile: (id: string) =>
+        fetchApiWithAuth<void>(`/agents/profiles/${id}`, {
+            method: 'DELETE',
+        }),
+
+    // Clone profile
+    cloneProfile: (id: string) =>
+        fetchApiWithAuth<AgentProfile>(`/agents/profiles/${id}/clone`, {
+            method: 'POST',
+        }),
+
+    // Test agent with a simple task
+    testAgent: (id: string, task: string) =>
+        fetchApiWithAuth<AgentTestResult>(`/agents/profiles/${id}/test`, {
+            method: 'POST',
+            body: JSON.stringify({ task }),
+        }),
+};
+
+// =============================================================================
+// Research Session API Types (Multi-Agent Collaboration)
+// =============================================================================
+
+export interface ResearchSession {
+    id: string;
+    user_id: string;
+    name: string;
+    task: string;
+    status: 'active' | 'running' | 'completed' | 'failed' | 'archived';
+    current_stage?: string;
+    progress: number;
+    workspace_path?: string;
+    total_tokens: number;
+    total_cost: number;
+    created_at: string;
+    updated_at: string;
+    completed_at?: string;
+}
+
+export interface ResearchSessionCreate {
+    name: string;
+    task: string;
+}
+
+export interface ResearchSessionUpdate {
+    name?: string;
+    status?: string;
+}
+
+export interface ResearchTaskItem {
+    id: string;
+    session_id: string;
+    parent_task_id?: string;
+    description: string;
+    assigned_agent: string;
+    priority: 'critical' | 'high' | 'medium' | 'low';
+    status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped';
+    dependencies: string[];
+    execution_order: number;
+    execution_group: number;
+    output?: string;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface AgentExecution {
+    id: string;
+    session_id: string;
+    agent_profile_id?: string;
+    research_task_id?: string;
+    agent_type: string;
+    agent_name: string;
+    task_description: string;
+    status: 'pending' | 'running' | 'completed' | 'failed';
+    input_context?: Record<string, unknown>;
+    output_result?: string;
+    structured_output?: {
+        key_findings?: string[];
+        uncertainties?: string[];
+        suggestions?: string[];
+        references?: string[];
+    };
+    tokens_used: number;
+    duration_ms: number;
+    model_used: string;
+    confidence?: number;
+    raw_output_path?: string;
+    error_message?: string;
+    retry_count: number;
+    started_at?: string;
+    completed_at?: string;
+}
+
+export interface MemoryLayer {
+    layer: string;
+    files: {
+        name: string;
+        path: string;
+        size: number;
+        modified_at: string;
+    }[];
+}
+
+export interface MemoryContent {
+    layer: string;
+    path: string;
+    content: string;
+}
+
+// Research execution events (SSE)
+export interface ResearchEvent {
+    type: 'session_started' | 'decomposition_complete' | 'group_started' |
+          'task_started' | 'task_progress' | 'task_completed' | 'task_failed' |
+          'group_completed' | 'synthesis_started' | 'synthesis_complete' |
+          'session_completed' | 'error';
+    data: {
+        session_id?: string;
+        task_id?: string;
+        agent_type?: string;
+        agent_name?: string;
+        message?: string;
+        progress?: number;
+        tasks?: ResearchTaskItem[];
+        result?: string;
+        synthesis?: string;
+        error?: string;
+        [key: string]: unknown;
+    };
+}
+
+// =============================================================================
+// Research Session API
+// =============================================================================
+
+export const researchApi = {
+    // Sessions CRUD
+    getSessions: (params?: { status?: string; page?: number; page_size?: number }) => {
+        const searchParams = new URLSearchParams();
+        if (params?.status) searchParams.set('status', params.status);
+        if (params?.page) searchParams.set('page', params.page.toString());
+        if (params?.page_size) searchParams.set('page_size', params.page_size.toString());
+        const query = searchParams.toString();
+        return fetchApiWithAuth<{ sessions: ResearchSession[]; total: number }>(
+            `/research/sessions${query ? `?${query}` : ''}`
+        );
+    },
+
+    createSession: (data: ResearchSessionCreate) =>
+        fetchApiWithAuth<ResearchSession>('/research/sessions', {
+            method: 'POST',
+            body: JSON.stringify(data),
+        }),
+
+    getSession: (id: string) =>
+        fetchApiWithAuth<ResearchSession>(`/research/sessions/${id}`),
+
+    updateSession: (id: string, data: ResearchSessionUpdate) =>
+        fetchApiWithAuth<ResearchSession>(`/research/sessions/${id}`, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        }),
+
+    deleteSession: (id: string) =>
+        fetchApiWithAuth<void>(`/research/sessions/${id}`, {
+            method: 'DELETE',
+        }),
+
+    // Tasks
+    getTasks: (sessionId: string) =>
+        fetchApiWithAuth<{ tasks: ResearchTaskItem[]; total: number }>(
+            `/research/sessions/${sessionId}/tasks`
+        ),
+
+    // Executions
+    getExecutions: (sessionId: string) =>
+        fetchApiWithAuth<{ executions: AgentExecution[]; total: number }>(
+            `/research/sessions/${sessionId}/executions`
+        ),
+
+    // Memory
+    getMemory: (sessionId: string, layer?: 'L0' | 'L1' | 'L2') => {
+        const query = layer ? `?layer=${layer}` : '';
+        return fetchApiWithAuth<{ layers: MemoryLayer[] }>(
+            `/research/sessions/${sessionId}/memory${query}`
+        );
+    },
+
+    getMemoryContent: (sessionId: string, path: string) =>
+        fetchApiWithAuth<MemoryContent>(
+            `/research/sessions/${sessionId}/memory/content?path=${encodeURIComponent(path)}`
+        ),
+
+    // Execute research (streaming via SSE)
+    executeResearch: async (
+        sessionId: string,
+        onEvent: (event: ResearchEvent) => void,
+        onError?: (error: string) => void
+    ): Promise<void> => {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        const response = await fetch(`${API_BASE}/research/sessions/${sessionId}/execute`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Research execution failed' }));
+            throw new Error(error.detail || 'Research execution failed');
+        }
+
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+
+        while (reader) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value);
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    try {
+                        const data = JSON.parse(line.slice(6));
+                        if (data.error) {
+                            onError?.(data.error);
+                        } else {
+                            onEvent(data as ResearchEvent);
+                        }
+                    } catch {
+                        // Skip invalid JSON lines
+                    }
+                }
+            }
+        }
+    },
+
+    // Execute specific skill
+    executeSkill: (sessionId: string, skill: string, params: Record<string, unknown>) =>
+        fetchApiWithAuth<{ result: string; tokens_used: number }>(
+            `/research/sessions/${sessionId}/skills/${skill}`,
+            {
+                method: 'POST',
+                body: JSON.stringify(params),
+            }
+        ),
+};
